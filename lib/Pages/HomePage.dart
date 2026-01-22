@@ -5,10 +5,10 @@ import 'package:camera/camera.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
-import 'package:path/path.dart' as path;
 
 class HomePage extends StatefulWidget {
   final CameraDescription cameraDescription;
@@ -28,7 +28,7 @@ class _HomePageState extends State<HomePage> {
     print("User SelectedData=$data");
   }
 
-  // camera controller helps in controlling the camera hardware like preview images, take photos
+  // camera controller helps in controlling the camera hardware like preview images, take photos and also for accessing the camera i need camera controller
   late CameraController cameraController;
   late Future<void> initializeControllerFuture;
   //Timer is a kind of a data type that is used to execute the code after some time when the timer time goes out.
@@ -41,7 +41,9 @@ class _HomePageState extends State<HomePage> {
   String? sessionId;
   //for storing the path of the video
   List<String> capturedVideosPath = [];
+  // for playing the video
   VideoPlayerController? videoPlayerController;
+  // final video path
   String? _generatedVideoPath;
 
   @override
@@ -111,6 +113,7 @@ class _HomePageState extends State<HomePage> {
       final image = await cameraController.takePicture();
       // temporary holding the image path and used for copying like when we capture the image it needs some space where it would store the image if not stored the image the OS might delete some apps to clear up the space.
       await File(image.path).copy(imagePath);
+      // adding the image path to the videos path
       capturedVideosPath.add(imagePath);
       setState(() {
         _imageCount++;
@@ -161,12 +164,15 @@ class _HomePageState extends State<HomePage> {
         directory.path,
         'timelapse_${timelapseType}_$sessionId.mp4',
       );
+      // for giving me the directory name where all the images are stor
       final sessionDir = path.dirname(capturedVideosPath.first);
       final frameRate = _getFrameVideoRates();
+      final inputPattern = path.join(sessionDir, 'frame_%05d.jpg');
       // now run the command to create videos from images
       final command =
-          '-framerate $frameRate -pattern_type glob -i "$sessionDir/*.jpg" -c:v libx264 -pix_fmt yuv420p -y "$outputPath"';
+          '-framerate $frameRate -i "$inputPattern" -c:v libx264 -pix_fmt yuv420p -preset ultrafast -y "$outputPath"';
       print('FFmpeg command:$command');
+
       await FFmpegKit.execute(command).then((session) async {
         final returnCode = await session.getReturnCode();
         if (ReturnCode.isSuccess(returnCode)) {
