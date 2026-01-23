@@ -8,6 +8,10 @@
 <string>Explanation on why the camera access is needed.</string>
 <key>NSMicrophoneUsageDescription</key>
 <string>Explanation on why the microphone access is needed.</string>
+<key>NSPhotoLibraryAddUsageDescription</key>
+<string>We need access to save your timelapse videos to Photos</string>
+<key>NSPhotoLibraryUsageDescription</key>
+<string>We need access to your photo library</string>
 	<key>CFBundleDisplayName</key>
 	<string>Timelapse App</string>
 	<key>CFBundleExecutable</key>
