@@ -1,15 +1,19 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:camera/camera.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:timelapse_app/Pages/VideoGridElement.dart';
 import 'package:video_player/video_player.dart';
 
 class HomePage extends StatefulWidget {
@@ -20,123 +24,120 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
-  // Get user preferences from SharedPreferences to determine timelapse speed
+class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
+  CameraController? cameraController;
+  Future<void>? initializeControllerFuture;
+  Timer? captureTimer;
+  int _imageCount = 0;
+  bool _isRecording = false;
+  bool _isProcessing = false;
+  bool _isLoading = false;
+  String timelapseType = "slow";
+  String? sessionId;
+  List<String> capturedVideosPath = [];
+  VideoPlayerController? videoPlayerController;
+  String? _generatedVideoPath;
+  String? _latestImagePath;
+  bool _isCameraInitialized = false;
+  bool _hasPermission = false;
+  List<AssetEntity> _videos = [];
+  int? _playingIndex;
+  VideoPlayerController? _currentVideoController;
+
+  // Animation controllers
+  late AnimationController _recordButtonController;
+  late AnimationController _pulseController;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _pulseAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeAnimations();
+    _initializeApp();
+    getGalleryImages();
+  }
+
+  void _initializeAnimations() {
+    _recordButtonController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.9).animate(
+      CurvedAnimation(parent: _recordButtonController, curve: Curves.easeInOut),
+    );
+
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.2).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+  }
+
+  Future<void> _initializeApp() async {
+    await getUserPreferences();
+    await requestPermission();
+
+    cameraController = CameraController(
+      widget.cameraDescription,
+      ResolutionPreset.high,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.jpeg,
+    );
+
+    try {
+      await cameraController!.initialize();
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = true;
+        });
+      }
+    } catch (e) {
+      print('Error initializing camera: $e');
+      if (mounted) {
+        _showSnackBar('Failed to initialize camera: $e');
+      }
+    }
+  }
+
   Future<void> getUserPreferences() async {
     final prefs = await SharedPreferences.getInstance();
     final data = prefs.getString("SelectedValue");
     setState(() {
       timelapseType = data ?? 'slow';
     });
-    print("User SelectedData=$data");
   }
 
-  // Request necessary permissions for camera and gallery access
-  // Different permissions required for different Android versions and iOS
   Future<void> requestPermission() async {
     try {
       if (Platform.isAndroid) {
-        // For Android 13+, we need to request specific media permissions
-        if (await Permission.photos.isDenied) {
-          await Permission.photos.request();
-        }
-        if (await Permission.videos.isDenied) {
-          await Permission.videos.request();
-        }
-        // For older Android versions, request storage permission
-        if (await Permission.storage.isDenied) {
+        if (await Permission.photos.isDenied) await Permission.photos.request();
+        if (await Permission.videos.isDenied) await Permission.videos.request();
+        if (await Permission.storage.isDenied)
           await Permission.storage.request();
-        }
       } else if (Platform.isIOS) {
-        // For iOS, request photos permission which covers both photos and videos
-        if (await Permission.photos.isDenied) {
-          await Permission.photos.request();
-        }
+        if (await Permission.photos.isDenied) await Permission.photos.request();
       }
     } catch (e) {
       print("Error requesting permissions: $e");
     }
   }
 
-  // Camera controller helps in controlling the camera hardware like preview images, take photos
-  // and also for accessing the camera. We need camera controller to interact with device camera
-  late CameraController cameraController;
-  Future<void>? initializeControllerFuture;
-
-  // Timer is a kind of a data type that is used to execute the code after some time
-  // when the timer time goes out. We use this to capture images at regular intervals
-  Timer? captureTimer;
-
-  // Track the number of images captured in current session
-  int _imageCount = 0;
-
-  // Flag to track if we're currently recording a timelapse
-  bool _isRecording = false;
-
-  // Flag to track if we're currently processing/generating the video
-  bool _isProcessing = false;
-
-  // Store the type of timelapse: 'fast' or 'slow'
-  String timelapseType = "";
-
-  // Session Id is used to uniquely identify the images that are captured in one session
-  // or for one timelapse and then group them together to form one video.
-  // This prevents mixing images from different recording sessions
-  String? sessionId;
-
-  // For storing the paths of all captured images in current session
-  List<String> capturedVideosPath = [];
-
-  // Video player controller for playing the generated timelapse video
-  VideoPlayerController? videoPlayerController;
-
-  // Store the final generated video path
-  String? _generatedVideoPath;
-
-  // Store the path of the latest captured image to show as preview thumbnail
-  String? _latestImagePath;
-
-  @override
-  void initState() {
-    super.initState();
-
-    // Initialize all necessary components when widget is created
-    _initializeApp();
-  }
-
-  // Initialize the app by loading preferences, requesting permissions, and setting up camera
-  Future<void> _initializeApp() async {
-    await getUserPreferences();
-    await requestPermission();
-    // Initialize camera settings with high resolution preset
-    cameraController = CameraController(
-      widget.cameraDescription,
-      ResolutionPreset.high,
-    );
-    initializeControllerFuture = cameraController.initialize();
-  }
-
-  // Get the interval between image captures based on timelapse type
-  // Fast mode: 500ms intervals, Slow mode: 5 second intervals
   Duration _getCaptureTimingsIntervals() {
     return timelapseType == 'fast'
         ? const Duration(milliseconds: 500)
         : const Duration(seconds: 5);
   }
 
-  // Get the frame rate for the final video output
-  // Returns frames per second (FPS) for the generated video
-  int _getFrameVideoRates() {
-    return 30;
-  }
+  int _getFrameVideoRates() => 30;
 
-  // Start the timelapse recording process
   Future<void> startTimeLapse() async {
-    // Clear any previous session data
+    HapticFeedback.mediumImpact();
     capturedVideosPath.clear();
-
-    // Assigning the unique id to the images so that it is uniquely used to combine
-    // the images and then form a video. Using timestamp ensures uniqueness
     sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
     setState(() {
@@ -146,419 +147,139 @@ class _HomePageState extends State<HomePage> {
       _latestImagePath = null;
     });
 
-    // Dispose the previous video controller if it exists to free up resources
+    _recordButtonController.forward();
     await videoPlayerController?.dispose();
     videoPlayerController = null;
 
-    // Set up periodic timer to capture images at specified intervals
     final interval = _getCaptureTimingsIntervals();
     captureTimer = Timer.periodic(interval, (timer) async {
       await _captureImage();
     });
   }
 
-  // Stop the timelapse recording and show dialog to generate video
-  void _stopTimeLapse() {
-    // Cancel the periodic timer to stop capturing images
-    captureTimer?.cancel();
+  Future<void> getGalleryImages() async {
     setState(() {
-      _isRecording = false;
+      _isLoading = true;
     });
-
-    // If we have captured images, ask user if they want to generate video
-    if (capturedVideosPath.isNotEmpty) {
-      _showGenerateVideoDialog();
+    final PermissionState permission =
+        await PhotoManager.requestPermissionExtend();
+    if (permission.isAuth) {
+      setState(() {
+        _hasPermission = true;
+      });
     }
-  }
-
-  // Capture a single image and save it to the session directory
-  Future<void> _captureImage() async {
-    try {
-      // Wait for camera to be fully initialized before capturing
-      await initializeControllerFuture;
-
-      // Get the app's document directory for storing images
-      final directory = await getApplicationDocumentsDirectory();
-
-      // This is for the path which will be used to store the multiple images for timelapse
-      // Each session gets its own directory with unique session ID
-      final sessionDir = Directory(
-        path.join(directory.path, 'timelapse_${timelapseType}_$sessionId'),
-      );
-
-      // Create the session directory if it doesn't exist
-      if (!await sessionDir.exists()) {
-        await sessionDir.create(recursive: true);
-      }
-
-      // For sorting the captured images in the correct order
-      // Padding with zeros ensures proper alphabetical/numerical sorting (e.g., 00001, 00002, etc.)
-      final paddedCount = _imageCount.toString().padLeft(5, '0');
-      final imagePath = path.join(sessionDir.path, 'frame_$paddedCount.jpg');
-
-      // Take the picture using camera controller
-      final image = await cameraController.takePicture();
-
-      // Temporary holding the image path and used for copying like when we capture the image
-      // it needs some space where it would store the image. If not stored, the image the OS
-      // might delete some apps to clear up the space. So we copy to permanent location
-      await File(image.path).copy(imagePath);
-
-      // Verify the file was actually created and get its size for logging
-      final savedFile = File(imagePath);
-      if (await savedFile.exists()) {
-        final fileSize = await savedFile.length();
-        print(
-          "Captured image $_imageCount at $imagePath (size: $fileSize bytes)",
-        );
-
-        // Adding the image path to the videos path list
-        capturedVideosPath.add(imagePath);
-        setState(() {
-          _imageCount++;
-          _latestImagePath =
-              imagePath; // Update latest image for preview thumbnail
-        });
-      } else {
-        print("Warning: Image file was not created at $imagePath");
-      }
-    } catch (e) {
-      print("Error capturing image: $e");
-    }
-  }
-
-  // Show dialog asking user if they want to generate video from captured images
-  void _showGenerateVideoDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible:
-          false, // User must make a choice, can't dismiss by tapping outside
-      builder: (context) => AlertDialog(
-        title: const Text("TimeLapse Complete"),
-        content: Text('Captured $_imageCount images. Generate video now?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("Cancel"),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _generateVideo();
-            },
-            child: const Text("Generate Video"),
-          ),
-        ],
-      ),
+    // get the list of all the albums
+    final List<AssetPathEntity> albums = await PhotoManager.getAssetPathList(
+      type: RequestType.video,
     );
+    AssetPathEntity? timelapseAlbum;
+    for (var album in albums) {
+      final albumName = album.name;
+      print("Found Album Name:$albumName");
+
+      if (albumName == "TimeLapse Videos") {
+        timelapseAlbum = album;
+        break;
+      }
+    }
+    List<AssetEntity> timeLapseVideos = [];
+    if (timelapseAlbum != null) {
+      final count = await timelapseAlbum.assetCountAsync;
+      timeLapseVideos = await timelapseAlbum.getAssetListRange(
+        start: 0,
+        end: count,
+      );
+      // sort the videos on the basis of creation so that recent one will come in the first than the other one
+      timeLapseVideos.sort(
+        (a, b) => b.createDateTime.compareTo(a.createDateTime),
+      );
+      setState(() {
+        _videos = timeLapseVideos;
+        _isLoading = false;
+      });
+      if (mounted) {
+        _showGalleryBottomSheet();
+      }
+    } else {
+      setState(() {
+        _videos = [];
+        _isLoading = false;
+      });
+      if (mounted) {
+        _showGalleryBottomSheet();
+      }
+    }
   }
 
-  // Now after capturing the images, compile all the images to form a timelapse video
-  // This uses FFmpeg to stitch together all captured images into a video file
-  Future<void> _generateVideo() async {
-    // Safety check: ensure we have images to process
-    if (capturedVideosPath.isEmpty) {
-      _showSnackBar("No images to process");
+  Future<void> playVideo(AssetEntity video, int index) async {
+    // HepticFeedback.lighImpact is mainly used for vibration like to vibrate when some thing specific event is happening
+    HapticFeedback.lightImpact();
+    if (_playingIndex == index && _currentVideoController != null) {
+      if (_currentVideoController!.value.isPlaying) {
+        await _currentVideoController!.pause();
+      } else {
+        await _currentVideoController!.play();
+      }
+      setState(() {});
       return;
     }
-
+    _currentVideoController?.dispose();
     setState(() {
-      _isProcessing = true;
+      _playingIndex = index;
+      _currentVideoController = null;
     });
-
-    try {
-      // Get directory to save the output video
-      final directory = await getApplicationDocumentsDirectory();
-      final outputPath = path.join(
-        directory.path,
-        'timelapse_${timelapseType}_$sessionId.mp4',
-      );
-
-      // For giving me the directory name where all the images are stored
-      final sessionDir = path.dirname(capturedVideosPath.first);
-      final frameRate = _getFrameVideoRates();
-
-      // Use sequential pattern for FFmpeg input - %05d means 5-digit padded numbers
-      final inputPattern = path.join(sessionDir, 'frame_%05d.jpg');
-
-      // Now run the FFmpeg command to create video from images
-      // -framerate: sets input frame rate
-      // -i: input pattern
-      // -c:v libx264: use H.264 codec for video encoding
-      // -pix_fmt yuv420p: pixel format for compatibility
-      // -preset ultrafast: encoding speed (faster = larger file)
-      // -y: overwrite output file if it exists
-      final command =
-          '-framerate $frameRate -i "$inputPattern" -c:v libx264 -pix_fmt yuv420p -preset ultrafast -y "$outputPath"';
-
-      print('FFmpeg command: $command');
-      print('Session directory: $sessionDir');
-      print('Output path: $outputPath');
-      print('Total images: ${capturedVideosPath.length}');
-
-      // Execute FFmpeg command and handle the result
-      await FFmpegKit.execute(command).then((session) async {
-        final returnCode = await session.getReturnCode();
-        final output = await session.getOutput();
-
-        print('Return code: $returnCode');
-        print('Output: $output');
-
-        // Check if FFmpeg execution was successful
-        if (ReturnCode.isSuccess(returnCode)) {
-          print("Video Generated Successfully at: $outputPath");
-
-          // Verify the video file actually exists and check its size
-          final videoFile = File(outputPath);
-          if (await videoFile.exists()) {
-            final fileSize = await videoFile.length();
-            print('Video file size: $fileSize bytes');
-
-            setState(() {
-              _generatedVideoPath = outputPath;
-              _isProcessing = false;
-            });
-
-            // Initialize video player to play the generated video
-            await _initializeVideoPlayer(outputPath);
-
-            // Save the generated video to device gallery
-            await _saveVideoToGallery(outputPath);
-
-            if (mounted) {
-              _showSnackBar("Timelapse video created and saved to gallery!");
-            }
-          } else {
-            throw Exception('Video file was not created');
-          }
-        } else {
-          // FFmpeg failed - log the error details
-          final failStackTrace = await session.getFailStackTrace();
-          print('FFmpeg failed with return code: $returnCode');
-          print('Fail stack trace: $failStackTrace');
-
-          setState(() {
-            _isProcessing = false;
-          });
-
-          if (mounted) {
-            _showSnackBar('Failed to generate video. Code: $returnCode');
-          }
-        }
-      });
-    } catch (e) {
-      print('Error generating video: $e');
-      setState(() {
-        _isProcessing = false;
-      });
-
+    final file = await video.file;
+    if (file != null && mounted) {
+      final controller = VideoPlayerController.file(file);
+      await controller.initialize();
+      await controller.setLooping(true);
+      await controller.play();
       if (mounted) {
-        _showSnackBar('Error: $e');
+        setState(() {
+          _currentVideoController = controller;
+        });
       }
     }
   }
 
-  // Initialize the video player with the generated video file
-  Future<void> _initializeVideoPlayer(String videoPath) async {
-    try {
-      videoPlayerController = VideoPlayerController.file(File(videoPath));
-      await videoPlayerController!.initialize();
-      setState(() {}); // Rebuild UI to show video player
-    } catch (e) {
-      print('Error initializing video player: $e');
-    }
-  }
-
-  // Save the generated video to device gallery so user can access it from Photos/Gallery app
-  Future<void> _saveVideoToGallery(String videoPath) async {
-    try {
-      // First check if we have access to save to gallery
-      if (!await Gal.hasAccess()) {
-        final granted = await Gal.requestAccess();
-        if (!granted) {
-          print("Gallery access denied");
-          return;
-        }
-      }
-
-      // Save video to gallery with custom album name
-      await Gal.putVideo(videoPath, album: 'TimeLapse Videos');
-      print("Video saved to gallery successfully");
-    } catch (e) {
-      print("Error saving video to gallery: $e");
-      if (mounted) {
-        _showSnackBar("Video created but couldn't save to gallery");
-      }
-    }
-  }
-
-  // Helper method to show snackbar messages to user
-  void _showSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
-    );
-  }
-
-  @override
-  void dispose() {
-    // Clean up resources when widget is disposed
-    captureTimer?.cancel(); // Cancel any running timer
-    cameraController.dispose(); // Release camera resources
-    videoPlayerController?.dispose(); // Release video player resources
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Timelapse - ${timelapseType.toUpperCase()}'),
-        backgroundColor: Colors.deepPurple,
-        elevation: 0,
-      ),
-      body: FutureBuilder<void>(
-        future: initializeControllerFuture,
-        builder: (context, snapshot) {
-          // Show loading indicator while camera is initializing
-          if (snapshot.connectionState == ConnectionState.done) {
-            return Column(
-              children: [
-                Expanded(
-                  child: Stack(
-                    children: [
-                      // Main preview area - shows either camera preview or generated video
-                      _generatedVideoPath != null &&
-                              videoPlayerController != null
-                          ? _buildVideoPreview()
-                          : CameraPreview(cameraController),
-
-                      // Latest image thumbnail - shown in top-right corner during recording
-                      // This gives visual feedback of what's being captured
-                      if (_isRecording && _latestImagePath != null)
-                        Positioned(
-                          top: 16,
-                          right: 16,
-                          child: _buildLatestImageThumbnail(),
-                        ),
-
-                      // Recording indicator badge - shown in top-left corner during recording
-                      if (_isRecording)
-                        Positioned(
-                          top: 16,
-                          left: 16,
-                          child: _buildRecordingIndicator(),
-                        ),
-                    ],
-                  ),
-                ),
-                // Control panel at bottom with stats and buttons
-                _buildControlPanel(),
-              ],
-            );
-          } else {
-            // Show loading spinner while camera initializes
-            return const Center(
-              child: CircularProgressIndicator(color: Colors.deepPurple),
-            );
-          }
-        },
-      ),
-    );
-  }
-
-  // Build the recording indicator badge that appears during recording
-  Widget _buildRecordingIndicator() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.red.withOpacity(0.9),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.3),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
+  void _showDeleteDialog(AssetEntity video, int index) {
+    showDialog(
+      context: context,
+      builder: (context) => BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C1E),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
           ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Pulsing white dot to indicate active recording
-          Container(
-            width: 12,
-            height: 12,
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              shape: BoxShape.circle,
+          title: const Text(
+            "Delete Timelapse?",
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+          ),
+          content: const Text(
+            "This action cannot be undone.",
+            style: TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text(
+                "Cancel",
+                style: TextStyle(color: Colors.white60),
+              ),
             ),
-          ),
-          const SizedBox(width: 8),
-          const Text(
-            'RECORDING',
-            style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-              fontSize: 14,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // Widget to show the latest captured image as a thumbnail in the corner
-  // This provides visual feedback to user showing what's being captured
-  Widget _buildLatestImageThumbnail() {
-    return Container(
-      width: 120,
-      height: 120,
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.white, width: 3),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.5),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(9),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            // Display the latest captured image
-            Image.file(
-              File(_latestImagePath!),
-              fit: BoxFit.cover,
-              // Show broken image icon if image fails to load
-              errorBuilder: (context, error, stackTrace) {
-                return Container(
-                  color: Colors.grey[800],
-                  child: const Icon(Icons.broken_image, color: Colors.white),
-                );
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                await _deleteVideo(video, index);
               },
-            ),
-            // Overlay at bottom showing current frame count
-            Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                color: Colors.black.withOpacity(0.7),
-                child: Text(
-                  'Frame $_imageCount',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
+              child: const Text("Delete"),
             ),
           ],
         ),
@@ -566,50 +287,605 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // Build video preview with play/pause controls after video is generated
+  void _showGalleryBottomSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.9,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        builder: (context, scrollController) => Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF1C1C1E),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          child: Column(
+            children: [
+              // Handle bar
+              Container(
+                margin: const EdgeInsets.only(top: 12, bottom: 8),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // Header
+              Padding(
+                padding: const EdgeInsets.all(20),
+                child: Row(
+                  children: [
+                    const Text(
+                      'TIMELAPSE GALLERY',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
+                ),
+              ),
+
+              Expanded(
+                child: _videos.isEmpty
+                    ? Center(
+                        child: Text(
+                          'No videos yet',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      )
+                    : GridView.builder(
+                        controller: scrollController,
+                        padding: const EdgeInsets.all(16),
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 2,
+                              crossAxisSpacing: 16,
+                              mainAxisSpacing: 16,
+                              childAspectRatio: 0.7,
+                            ),
+                        itemCount: _videos.length,
+                        itemBuilder: (context, index) {
+                          final isPlaying = _playingIndex == index;
+                          return VideoGridItem(
+                            video: _videos[index],
+                            isPlaying: isPlaying,
+                            videoController: isPlaying
+                                ? _currentVideoController
+                                : null,
+                            onTap: () => playVideo(_videos[index], index),
+                            onDelete: () =>
+                                _showDeleteDialog(_videos[index], index),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _deleteVideo(AssetEntity video, int index) async {
+    try {
+      final List<String> results = await PhotoManager.editor.deleteWithIds([
+        video.id,
+      ]);
+      if (results.isNotEmpty) {
+        if (_playingIndex == index) {
+          await _currentVideoController?.dispose();
+          _currentVideoController = null;
+          _playingIndex = null;
+        }
+        setState(() {
+          _videos.removeAt(index);
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text("Timelapse deleted"),
+              backgroundColor: const Color(0xFF2C2C2E),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print("Error deleting video: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Failed to delete: $e"),
+            backgroundColor: Colors.red.withOpacity(0.8),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  void _stopTimeLapse() {
+    HapticFeedback.mediumImpact();
+    captureTimer?.cancel();
+    setState(() {
+      _isRecording = false;
+    });
+    _recordButtonController.reverse();
+
+    if (capturedVideosPath.isNotEmpty) {
+      _showGenerateVideoDialog();
+    }
+  }
+
+  Future<void> _captureImage() async {
+    if (cameraController == null || !cameraController!.value.isInitialized) {
+      print("Camera not initialized");
+      return;
+    }
+
+    try {
+      HapticFeedback.lightImpact();
+
+      final directory = await getApplicationDocumentsDirectory();
+      final sessionDir = Directory(
+        path.join(directory.path, 'timelapse_${timelapseType}_$sessionId'),
+      );
+
+      if (!await sessionDir.exists()) {
+        await sessionDir.create(recursive: true);
+      }
+
+      final paddedCount = _imageCount.toString().padLeft(5, '0');
+      final imagePath = path.join(sessionDir.path, 'frame_$paddedCount.jpg');
+
+      final image = await cameraController!.takePicture();
+      await File(image.path).copy(imagePath);
+
+      final savedFile = File(imagePath);
+      if (await savedFile.exists()) {
+        capturedVideosPath.add(imagePath);
+        if (mounted) {
+          setState(() {
+            _imageCount++;
+            _latestImagePath = imagePath;
+          });
+        }
+      }
+    } catch (e) {
+      print("Error capturing image: $e");
+    }
+  }
+
+  void _showGenerateVideoDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C1E),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: const Text(
+            "Timelapse Complete",
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          content: Text(
+            'Captured $_imageCount frames. Generate video?',
+            style: const TextStyle(color: Colors.white70, fontSize: 16),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text(
+                "Cancel",
+                style: TextStyle(color: Colors.white60),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _generateVideo();
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF7C3AED),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: Text("Generate", style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _generateVideo() async {
+    if (capturedVideosPath.isEmpty) {
+      _showSnackBar("No images to process");
+      return;
+    }
+
+    setState(() => _isProcessing = true);
+
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final outputPath = path.join(
+        directory.path,
+        'timelapse_${timelapseType}_$sessionId.mp4',
+      );
+
+      final sessionDir = path.dirname(capturedVideosPath.first);
+      final frameRate = _getFrameVideoRates();
+      final inputPattern = path.join(sessionDir, 'frame_%05d.jpg');
+
+      final command =
+          '-framerate $frameRate -i "$inputPattern" -c:v libx264 -pix_fmt yuv420p -preset ultrafast -y "$outputPath"';
+
+      await FFmpegKit.execute(command).then((session) async {
+        final returnCode = await session.getReturnCode();
+
+        if (ReturnCode.isSuccess(returnCode)) {
+          final videoFile = File(outputPath);
+          if (await videoFile.exists()) {
+            setState(() {
+              _generatedVideoPath = outputPath;
+              _isProcessing = false;
+            });
+
+            await _initializeVideoPlayer(outputPath);
+            await _saveVideoToGallery(outputPath);
+
+            if (mounted) {
+              _showSnackBar("Timelapse saved to gallery!");
+            }
+          }
+        } else {
+          setState(() => _isProcessing = false);
+          if (mounted) _showSnackBar('Failed to generate video');
+        }
+      });
+    } catch (e) {
+      setState(() => _isProcessing = false);
+      if (mounted) _showSnackBar('Error: $e');
+    }
+  }
+
+  Future<void> _initializeVideoPlayer(String videoPath) async {
+    try {
+      videoPlayerController = VideoPlayerController.file(File(videoPath));
+      await videoPlayerController!.initialize();
+      setState(() {});
+    } catch (e) {
+      print('Error initializing video player: $e');
+    }
+  }
+
+  Future<void> _saveVideoToGallery(String videoPath) async {
+    try {
+      if (!await Gal.hasAccess()) {
+        final granted = await Gal.requestAccess();
+        if (!granted) return;
+      }
+      await Gal.putVideo(videoPath, album: 'TimeLapse Videos');
+    } catch (e) {
+      print("Error saving video to gallery: $e");
+    }
+  }
+
+  void _showSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: const Color(0xFF2C2C2E),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    captureTimer?.cancel();
+    cameraController?.dispose();
+    videoPlayerController?.dispose();
+    _recordButtonController.dispose();
+    _pulseController.dispose();
+    _currentVideoController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      extendBodyBehindAppBar: true,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        systemOverlayStyle: SystemUiOverlayStyle.light,
+        title: Text(
+          timelapseType.toUpperCase(),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.2,
+          ),
+        ),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            onPressed: () {
+              getGalleryImages();
+            },
+            icon: Icon(Icons.image),
+          ),
+        ],
+      ),
+      body: _isCameraInitialized && cameraController != null
+          ? Stack(
+              children: [
+                // Full-screen camera preview
+                Positioned.fill(
+                  child:
+                      _generatedVideoPath != null &&
+                          videoPlayerController != null
+                      ? _buildVideoPreview()
+                      : CameraPreview(cameraController!),
+                ),
+
+                // Top gradient overlay
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    height: 120,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.black.withOpacity(0.6),
+                          Colors.transparent,
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+                // Recording indicators
+                if (_isRecording) ...[
+                  _buildRecordingIndicator(),
+                  if (_latestImagePath != null) _buildLatestImageThumbnail(),
+                ],
+
+                // Bottom control panel
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: _buildControlPanel(),
+                ),
+              ],
+            )
+          : Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 60,
+                    height: 60,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        colors: [
+                          const Color(0xFF7C3AED),
+                          const Color(0xFF7C3AED).withOpacity(0.6),
+                        ],
+                      ),
+                    ),
+                    child: const Center(
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 3,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    "Initializing Camera...",
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+                ],
+              ),
+            ),
+    );
+  }
+
+  Widget _buildRecordingIndicator() {
+    return Positioned(
+      top: 100,
+      left: 20,
+      child: AnimatedBuilder(
+        animation: _pulseAnimation,
+        builder: (context, child) {
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.red.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: Colors.red.withOpacity(0.5),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.red.withOpacity(0.3 * _pulseAnimation.value),
+                  blurRadius: 20,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.red.withOpacity(0.6),
+                        blurRadius: 8,
+                        spreadRadius: 2,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'REC',
+                  style: TextStyle(
+                    color: Colors.red,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildLatestImageThumbnail() {
+    return Positioned(
+      top: 100,
+      right: 20,
+      child: Container(
+        width: 90,
+        height: 90,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withOpacity(0.3), width: 2),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.4),
+              blurRadius: 20,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.file(
+                File(_latestImagePath!),
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    color: const Color(0xFF2C2C2E),
+                    child: const Icon(
+                      Icons.broken_image,
+                      color: Colors.white38,
+                    ),
+                  );
+                },
+              ),
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: ClipRRect(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.4),
+                      ),
+                      child: Text(
+                        '$_imageCount',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildVideoPreview() {
     return Stack(
       alignment: Alignment.center,
       children: [
-        // Video player centered on screen
         Center(
           child: AspectRatio(
             aspectRatio: videoPlayerController!.value.aspectRatio,
             child: VideoPlayer(videoPlayerController!),
           ),
         ),
-        // Control buttons overlay at bottom
         Positioned(
-          bottom: 20,
+          bottom: 140,
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Play/Pause button
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(30),
-                ),
-                child: IconButton(
-                  onPressed: () {
-                    setState(() {
-                      videoPlayerController!.value.isPlaying
-                          ? videoPlayerController!.pause()
-                          : videoPlayerController!.play();
-                    });
-                  },
-                  icon: Icon(
+              _buildGlassButton(
+                icon: videoPlayerController!.value.isPlaying
+                    ? Icons.pause
+                    : Icons.play_arrow,
+                onPressed: () {
+                  setState(() {
                     videoPlayerController!.value.isPlaying
-                        ? Icons.pause
-                        : Icons.play_arrow,
-                    color: Colors.white,
-                    size: 40,
-                  ),
-                ),
+                        ? videoPlayerController!.pause()
+                        : videoPlayerController!.play();
+                  });
+                },
               ),
-              const SizedBox(width: 20),
-              // Button to start new recording session
-              ElevatedButton.icon(
+              const SizedBox(width: 16),
+              _buildGlassButton(
+                icon: Icons.fiber_manual_record,
+                label: 'New',
                 onPressed: () {
                   setState(() {
                     _generatedVideoPath = null;
@@ -617,16 +893,6 @@ class _HomePageState extends State<HomePage> {
                     videoPlayerController = null;
                   });
                 },
-                icon: const Icon(Icons.camera_alt),
-                label: const Text('New Recording'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.deepPurple,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 12,
-                  ),
-                ),
               ),
             ],
           ),
@@ -635,140 +901,308 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // Build the control panel at bottom showing stats and control buttons
-  Widget _buildControlPanel() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.black87,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.3),
-            blurRadius: 10,
-            offset: const Offset(0, -2),
+  Widget _buildGlassButton({
+    required IconData icon,
+    String? label,
+    required VoidCallback onPressed,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(24),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withOpacity(0.2), width: 1),
           ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // Show processing indicator when generating video
-          if (_isProcessing)
-            const Column(
-              children: [
-                CircularProgressIndicator(color: Colors.deepPurple),
-                SizedBox(height: 10),
-                Text(
-                  'Generating video and saving to gallery...',
-                  style: TextStyle(color: Colors.white, fontSize: 16),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onPressed,
+              borderRadius: BorderRadius.circular(24),
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: label != null ? 20 : 16,
+                  vertical: 12,
                 ),
-              ],
-            )
-          else ...[
-            // Stats row showing images captured, interval, and output FPS
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildStatColumn('Images Captured', '$_imageCount'),
-                _buildStatColumn(
-                  'Interval',
-                  '${_getCaptureTimingsIntervals().inMilliseconds / 1000}s',
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(icon, color: Colors.white, size: 24),
+                    if (label != null) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        label,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-                _buildStatColumn('Output FPS', '${_getFrameVideoRates()}'),
-              ],
+              ),
             ),
-            const SizedBox(height: 20),
-            // Control buttons row
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                // Start button - disabled when recording or video is generated
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: ElevatedButton.icon(
-                      onPressed: _isRecording || _generatedVideoPath != null
-                          ? null
-                          : startTimeLapse,
-                      icon: const Icon(Icons.play_arrow),
-                      label: const Text('Start'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: Colors.grey,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                // Stop button - only enabled when recording
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: ElevatedButton.icon(
-                      onPressed: _isRecording ? _stopTimeLapse : null,
-                      icon: const Icon(Icons.stop),
-                      label: const Text('Stop'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: Colors.grey,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                // Make Video button - shown only when we have captured images and not recording
-                if (capturedVideosPath.isNotEmpty && !_isRecording)
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: ElevatedButton.icon(
-                        onPressed: _generateVideo,
-                        icon: const Icon(Icons.video_library),
-                        label: const Text('Make Video'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ],
-        ],
+          ),
+        ),
       ),
     );
   }
 
-  // Helper widget to build a stat column showing label and value
-  Widget _buildStatColumn(String label, String value) {
+  Widget _buildControlPanel() {
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.black.withOpacity(0.7),
+                Colors.black.withOpacity(0.9),
+              ],
+            ),
+            border: Border(
+              top: BorderSide(color: Colors.white.withOpacity(0.1), width: 1),
+            ),
+          ),
+          padding: EdgeInsets.only(
+            left: 24,
+            right: 24,
+            top: 24,
+            bottom: MediaQuery.of(context).padding.bottom + 24,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_isProcessing)
+                _buildProcessingIndicator()
+              else ...[
+                _buildStatsRow(),
+                const SizedBox(height: 28),
+                _buildRecordButton(),
+                if (capturedVideosPath.isNotEmpty && !_isRecording) ...[
+                  const SizedBox(height: 16),
+                  _buildMakeVideoButton(),
+                ],
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProcessingIndicator() {
     return Column(
       children: [
-        Text(
-          label,
-          style: const TextStyle(color: Colors.white70, fontSize: 12),
+        Container(
+          width: 50,
+          height: 50,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(
+              colors: [
+                const Color(0xFF7C3AED),
+                const Color(0xFF7C3AED).withOpacity(0.6),
+              ],
+            ),
+          ),
+          child: const Center(
+            child: CircularProgressIndicator(
+              color: Colors.white,
+              strokeWidth: 3,
+            ),
+          ),
         ),
-        const SizedBox(height: 5),
+        const SizedBox(height: 16),
+        const Text(
+          'Generating timelapse...',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatsRow() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceAround,
+      children: [
+        _buildStatItem(Icons.photo_camera, '$_imageCount', 'Frames'),
+        Container(width: 1, height: 40, color: Colors.white.withOpacity(0.1)),
+        _buildStatItem(
+          Icons.timer,
+          '${_getCaptureTimingsIntervals().inMilliseconds / 1000}s',
+          'Interval',
+        ),
+        Container(width: 1, height: 40, color: Colors.white.withOpacity(0.1)),
+        _buildStatItem(Icons.speed, '${_getFrameVideoRates()}', 'FPS'),
+      ],
+    );
+  }
+
+  Widget _buildStatItem(IconData icon, String value, String label) {
+    return Column(
+      children: [
+        Icon(icon, color: const Color(0xFF7C3AED), size: 20),
+        const SizedBox(height: 8),
         Text(
           value,
           style: const TextStyle(
             color: Colors.white,
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.5),
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.5,
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildRecordButton() {
+    final isDisabled = _generatedVideoPath != null;
+
+    return GestureDetector(
+      onTapDown: (_) {
+        if (!isDisabled) {
+          HapticFeedback.lightImpact();
+          _recordButtonController.forward();
+        }
+      },
+      onTapUp: (_) {
+        if (!isDisabled) {
+          _recordButtonController.reverse();
+          if (_isRecording) {
+            _stopTimeLapse();
+          } else {
+            startTimeLapse();
+          }
+        }
+      },
+      onTapCancel: () {
+        if (!isDisabled) _recordButtonController.reverse();
+      },
+      child: AnimatedBuilder(
+        animation: _scaleAnimation,
+        builder: (context, child) {
+          return Transform.scale(
+            scale: isDisabled ? 1.0 : _scaleAnimation.value,
+            child: Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: isDisabled
+                      ? [
+                          Colors.grey.withOpacity(0.3),
+                          Colors.grey.withOpacity(0.2),
+                        ]
+                      : _isRecording
+                      ? [
+                          Colors.red.withOpacity(0.9),
+                          Colors.red.withOpacity(0.7),
+                        ]
+                      : [const Color(0xFF7C3AED), const Color(0xFF5B21B6)],
+                ),
+                boxShadow: isDisabled
+                    ? []
+                    : [
+                        BoxShadow(
+                          color:
+                              (_isRecording
+                                      ? Colors.red
+                                      : const Color(0xFF7C3AED))
+                                  .withOpacity(0.5),
+                          blurRadius: 30,
+                          spreadRadius: 5,
+                        ),
+                      ],
+              ),
+              child: Center(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: Icon(
+                    _isRecording
+                        ? Icons.stop_rounded
+                        : Icons.fiber_manual_record,
+                    key: ValueKey(_isRecording),
+                    color: Colors.white,
+                    size: _isRecording ? 32 : 40,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildMakeVideoButton() {
+    return Container(
+      width: double.infinity,
+      height: 52,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        gradient: LinearGradient(
+          colors: [
+            const Color(0xFF7C3AED).withOpacity(0.8),
+            const Color(0xFF5B21B6).withOpacity(0.8),
+          ],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF7C3AED).withOpacity(0.3),
+            blurRadius: 20,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: _generateVideo,
+          borderRadius: BorderRadius.circular(16),
+          child: const Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.video_library, color: Colors.white, size: 20),
+                SizedBox(width: 10),
+                Text(
+                  'Generate Timelapse',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
