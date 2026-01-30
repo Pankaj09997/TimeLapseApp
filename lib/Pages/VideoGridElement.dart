@@ -9,6 +9,7 @@ import 'package:video_player/video_player.dart';
 class VideoGridItem extends StatefulWidget {
   final AssetEntity video;
   final bool isPlaying;
+  final bool isLoading; // Add this parameter
   final VideoPlayerController? videoController;
   final VoidCallback onTap;
   final VoidCallback onDelete;
@@ -17,6 +18,7 @@ class VideoGridItem extends StatefulWidget {
     super.key,
     required this.video,
     required this.isPlaying,
+    this.isLoading = false, // Add default value
     this.videoController,
     required this.onTap,
     required this.onDelete,
@@ -75,16 +77,16 @@ class _VideoGridItemState extends State<VideoGridItem> {
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(24),
-          border: widget.isPlaying
+          border: widget.isPlaying || widget.isLoading
               ? Border.all(color: const Color(0xFF7C3AED), width: 3)
               : null,
           boxShadow: [
             BoxShadow(
-              color: widget.isPlaying
+              color: widget.isPlaying || widget.isLoading
                   ? const Color(0xFF7C3AED).withOpacity(0.4)
                   : Colors.black.withOpacity(0.3),
-              blurRadius: widget.isPlaying ? 20 : 10,
-              spreadRadius: widget.isPlaying ? 2 : 0,
+              blurRadius: widget.isPlaying || widget.isLoading ? 20 : 10,
+              spreadRadius: widget.isPlaying || widget.isLoading ? 2 : 0,
               offset: const Offset(0, 4),
             ),
           ],
@@ -111,7 +113,7 @@ class _VideoGridItemState extends State<VideoGridItem> {
                 ),
 
               // Gradient overlay (only when not playing)
-              if (!widget.isPlaying)
+              if (!widget.isPlaying && !widget.isLoading)
                 Container(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -126,41 +128,83 @@ class _VideoGridItemState extends State<VideoGridItem> {
                   ),
                 ),
 
-              // Play/Pause icon overlay
-              Center(
-                child: AnimatedOpacity(
-                  opacity: widget.isPlaying ? 0.0 : 1.0,
-                  duration: const Duration(milliseconds: 300),
-                  child: Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        colors: [
-                          const Color(0xFF7C3AED).withOpacity(0.9),
-                          const Color(0xFF5B21B6).withOpacity(0.9),
-                        ],
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF7C3AED).withOpacity(0.5),
-                          blurRadius: 20,
-                          spreadRadius: 2,
+              // Loading indicator overlay
+              if (widget.isLoading)
+                Container(
+                  color: Colors.black.withOpacity(0.5),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 50,
+                          height: 50,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: LinearGradient(
+                              colors: [
+                                const Color(0xFF7C3AED),
+                                const Color(0xFF5B21B6),
+                              ],
+                            ),
+                          ),
+                          child: const Center(
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 3,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Loading...',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
                       ],
                     ),
-                    child: const Icon(
-                      Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 36,
+                  ),
+                ),
+
+              // Play/Pause icon overlay (only when not playing and not loading)
+              if (!widget.isPlaying && !widget.isLoading)
+                Center(
+                  child: AnimatedOpacity(
+                    opacity: 1.0,
+                    duration: const Duration(milliseconds: 300),
+                    child: Container(
+                      width: 60,
+                      height: 60,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          colors: [
+                            const Color(0xFF7C3AED).withOpacity(0.9),
+                            const Color(0xFF5B21B6).withOpacity(0.9),
+                          ],
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF7C3AED).withOpacity(0.5),
+                            blurRadius: 20,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: const Icon(
+                        Icons.play_arrow_rounded,
+                        color: Colors.white,
+                        size: 36,
+                      ),
                     ),
                   ),
                 ),
-              ),
 
               // Playing indicator badge
-              if (widget.isPlaying)
+              if (widget.isPlaying && !widget.isLoading)
                 Positioned(
                   top: 12,
                   left: 12,
@@ -206,8 +250,8 @@ class _VideoGridItemState extends State<VideoGridItem> {
                   ),
                 ),
 
-              // Duration badge (only when not playing)
-              if (!widget.isPlaying)
+              // Duration badge (only when not playing and not loading)
+              if (!widget.isPlaying && !widget.isLoading)
                 Positioned(
                   top: 12,
                   right: 12,
@@ -241,8 +285,8 @@ class _VideoGridItemState extends State<VideoGridItem> {
                   ),
                 ),
 
-              // Delete button (only when not playing)
-              if (!widget.isPlaying)
+              // Delete button (only when not playing and not loading)
+              if (!widget.isPlaying && !widget.isLoading)
                 Positioned(
                   top: 12,
                   left: 12,
@@ -271,8 +315,8 @@ class _VideoGridItemState extends State<VideoGridItem> {
                   ),
                 ),
 
-              // Date and info panel at bottom (only when not playing)
-              if (!widget.isPlaying)
+              // Date and info panel at bottom (only when not playing and not loading)
+              if (!widget.isPlaying && !widget.isLoading)
                 Positioned(
                   bottom: 0,
                   left: 0,

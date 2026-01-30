@@ -43,6 +43,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   List<AssetEntity> _videos = [];
   int? _playingIndex;
   VideoPlayerController? _currentVideoController;
+  bool _isTimeLapseGenerated = false;
+  bool _isVideoLoading = false;
 
   // Animation controllers
   late AnimationController _recordButtonController;
@@ -212,8 +214,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Future<void> playVideo(AssetEntity video, int index) async {
-    // HepticFeedback.lighImpact is mainly used for vibration like to vibrate when some thing specific event is happening
     HapticFeedback.lightImpact();
+
     if (_playingIndex == index && _currentVideoController != null) {
       if (_currentVideoController!.value.isPlaying) {
         await _currentVideoController!.pause();
@@ -223,21 +225,41 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       setState(() {});
       return;
     }
+
     _currentVideoController?.dispose();
     setState(() {
       _playingIndex = index;
       _currentVideoController = null;
+      _isVideoLoading = true;
     });
-    final file = await video.file;
-    if (file != null && mounted) {
-      final controller = VideoPlayerController.file(file);
-      await controller.initialize();
-      await controller.setLooping(true);
-      await controller.play();
+
+    try {
+      final file = await video.file;
+      if (file != null && mounted) {
+        final controller = VideoPlayerController.file(file);
+
+        // Initialize the controller
+        await controller.initialize();
+        await controller.setLooping(true);
+
+        if (mounted && _playingIndex == index) {
+          setState(() {
+            _currentVideoController = controller;
+            _isVideoLoading = false;
+          });
+          await controller.play();
+        } else {
+          controller.dispose();
+        }
+      }
+    } catch (e) {
+      print('Error loading video: $e');
       if (mounted) {
         setState(() {
-          _currentVideoController = controller;
+          _isVideoLoading = false;
+          _playingIndex = null;
         });
+        _showSnackBar('Failed to load video');
       }
     }
   }
@@ -292,85 +314,95 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.9,
-        minChildSize: 0.5,
-        maxChildSize: 0.95,
-        builder: (context, scrollController) => Container(
-          decoration: const BoxDecoration(
-            color: Color(0xFF1C1C1E),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
-          ),
-          child: Column(
-            children: [
-              // Handle bar
-              Container(
-                margin: const EdgeInsets.only(top: 12, bottom: 8),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.3),
-                  borderRadius: BorderRadius.circular(2),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => DraggableScrollableSheet(
+          initialChildSize: 0.9,
+          minChildSize: 0.5,
+          maxChildSize: 0.95,
+          builder: (context, scrollController) => Container(
+            decoration: const BoxDecoration(
+              color: Color(0xFF1C1C1E),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+            ),
+            child: Column(
+              children: [
+                // Handle bar
+                Container(
+                  margin: const EdgeInsets.only(top: 12, bottom: 8),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.3),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-              ),
-              // Header
-              Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  children: [
-                    const Text(
-                      'TIMELAPSE GALLERY',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1.2,
-                      ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                  ],
-                ),
-              ),
-
-              Expanded(
-                child: _videos.isEmpty
-                    ? Center(
-                        child: Text(
-                          'No videos yet',
-                          style: TextStyle(color: Colors.white),
+                // Header
+                Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Row(
+                    children: [
+                      const Text(
+                        'TIMELAPSE GALLERY',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
                         ),
-                      )
-                    : GridView.builder(
-                        controller: scrollController,
-                        padding: const EdgeInsets.all(16),
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 2,
-                              crossAxisSpacing: 16,
-                              mainAxisSpacing: 16,
-                              childAspectRatio: 0.7,
-                            ),
-                        itemCount: _videos.length,
-                        itemBuilder: (context, index) {
-                          final isPlaying = _playingIndex == index;
-                          return VideoGridItem(
-                            video: _videos[index],
-                            isPlaying: isPlaying,
-                            videoController: isPlaying
-                                ? _currentVideoController
-                                : null,
-                            onTap: () => playVideo(_videos[index], index),
-                            onDelete: () =>
-                                _showDeleteDialog(_videos[index], index),
-                          );
-                        },
                       ),
-              ),
-            ],
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+                ),
+
+                Expanded(
+                  child: _videos.isEmpty
+                      ? Center(
+                          child: Text(
+                            'No videos yet',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                        )
+                      : GridView.builder(
+                          controller: scrollController,
+                          padding: const EdgeInsets.all(16),
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: 2,
+                                crossAxisSpacing: 16,
+                                mainAxisSpacing: 16,
+                                childAspectRatio: 0.7,
+                              ),
+                          itemCount: _videos.length,
+                          itemBuilder: (context, index) {
+                            final isPlaying = _playingIndex == index;
+                            final isLoading =
+                                _isVideoLoading && _playingIndex == index;
+                            return VideoGridItem(
+                              video: _videos[index],
+                              isPlaying: isPlaying,
+                              isLoading: isLoading,
+                              videoController: isPlaying
+                                  ? _currentVideoController
+                                  : null,
+                              onTap: () async {
+                                await playVideo(_videos[index], index);
+                                setState(() {});
+                                setModalState(() {});
+                              },
+
+                              onDelete: () =>
+                                  _showDeleteDialog(_videos[index], index),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -554,6 +586,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             setState(() {
               _generatedVideoPath = outputPath;
               _isProcessing = false;
+              _isTimeLapseGenerated = true;
             });
 
             await _initializeVideoPlayer(outputPath);
@@ -578,6 +611,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     try {
       videoPlayerController = VideoPlayerController.file(File(videoPath));
       await videoPlayerController!.initialize();
+      await videoPlayerController!.setLooping(true);
+      await videoPlayerController!.play();
       setState(() {});
     } catch (e) {
       print('Error initializing video player: $e');
@@ -1162,42 +1197,74 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     return Container(
       width: double.infinity,
       height: 52,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        gradient: LinearGradient(
-          colors: [
-            const Color(0xFF7C3AED).withOpacity(0.8),
-            const Color(0xFF5B21B6).withOpacity(0.8),
-          ],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF7C3AED).withOpacity(0.3),
-            blurRadius: 20,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      decoration: _isTimeLapseGenerated
+          ? BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              gradient: LinearGradient(
+                colors: [
+                  const Color.fromARGB(255, 188, 188, 189).withOpacity(0.8),
+                  const Color.fromARGB(255, 203, 202, 206).withOpacity(0.8),
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color.fromARGB(
+                    255,
+                    198,
+                    195,
+                    202,
+                  ).withOpacity(0.3),
+                  blurRadius: 20,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            )
+          : BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              gradient: LinearGradient(
+                colors: [
+                  const Color(0xFF7C3AED).withOpacity(0.8),
+                  const Color(0xFF5B21B6).withOpacity(0.8),
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF7C3AED).withOpacity(0.3),
+                  blurRadius: 20,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: _generateVideo,
+          onTap: _isTimeLapseGenerated ? null : _generateVideo,
           borderRadius: BorderRadius.circular(16),
-          child: const Center(
+          child: Center(
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(Icons.video_library, color: Colors.white, size: 20),
                 SizedBox(width: 10),
-                Text(
-                  'Generate Timelapse',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.3,
-                  ),
-                ),
+                _isTimeLapseGenerated
+                    ? Text(
+                        'Timelapse Generated',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.3,
+                        ),
+                      )
+                    : Text(
+                        'Generate Timelapse',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
               ],
             ),
           ),
