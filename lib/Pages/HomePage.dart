@@ -264,7 +264,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
   }
 
-  void _showDeleteDialog(AssetEntity video, int index) {
+  void _showDeleteDialog(
+    AssetEntity video,
+    int index,
+    StateSetter setModalState,
+  ) {
     showDialog(
       context: context,
       builder: (context) => BackdropFilter(
@@ -294,6 +298,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               onPressed: () async {
                 Navigator.pop(context);
                 await _deleteVideo(video, index);
+                if (mounted) {
+                  setState(() {});
+                  setModalState(() {});
+                }
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red,
@@ -301,7 +309,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              child: const Text("Delete"),
+              child: const Text(
+                "Delete",
+                style: TextStyle(color: Colors.white),
+              ),
             ),
           ],
         ),
@@ -395,8 +406,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                                 setModalState(() {});
                               },
 
-                              onDelete: () =>
-                                  _showDeleteDialog(_videos[index], index),
+                              onDelete: () => _showDeleteDialog(
+                                _videos[index],
+                                index,
+                                setModalState,
+                              ),
                             );
                           },
                         ),
