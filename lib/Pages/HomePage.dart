@@ -82,7 +82,28 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Future<void> _initializeApp() async {
     await getUserPreferences();
-    await requestPermission();
+
+    // Request camera permission first
+    final cameraPermissionGranted = await requestPermission();
+
+    if (!cameraPermissionGranted) {
+      if (mounted) {
+        _showSnackBar('Camera permission is required to use this app');
+      }
+      return;
+    }
+
+    // Add a small delay to ensure camera hardware is available after permission grant
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    // Only initialize camera after permission is granted
+    await _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    if (cameraController != null) {
+      return; // Already initialized
+    }
 
     cameraController = CameraController(
       widget.cameraDescription,
@@ -91,17 +112,36 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
 
-    try {
-      await cameraController!.initialize();
-      if (mounted) {
-        setState(() {
-          _isCameraInitialized = true;
-        });
-      }
-    } catch (e) {
-      print('Error initializing camera: $e');
-      if (mounted) {
-        _showSnackBar('Failed to initialize camera: $e');
+    int retryCount = 0;
+    const maxRetries = 3;
+
+    while (retryCount < maxRetries) {
+      try {
+        print("Attempting to initialize camera (attempt ${retryCount + 1})...");
+        await cameraController!.initialize();
+
+        if (mounted) {
+          setState(() {
+            _isCameraInitialized = true;
+          });
+          print("Camera initialized successfully");
+        }
+        return; // Success, exit the retry loop
+      } catch (e) {
+        print('Error initializing camera (attempt ${retryCount + 1}): $e');
+        retryCount++;
+
+        if (retryCount < maxRetries) {
+          // Wait before retrying
+          await Future.delayed(Duration(milliseconds: 500 * retryCount));
+        } else {
+          // Final attempt failed
+          if (mounted) {
+            _showSnackBar(
+              'Failed to initialize camera. Please restart the app.',
+            );
+          }
+        }
       }
     }
   }
@@ -114,18 +154,45 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     });
   }
 
-  Future<void> requestPermission() async {
+  Future<bool> requestPermission() async {
     try {
       if (Platform.isAndroid) {
         if (await Permission.photos.isDenied) await Permission.photos.request();
         if (await Permission.videos.isDenied) await Permission.videos.request();
         if (await Permission.storage.isDenied)
           await Permission.storage.request();
+
+        // Request camera permission and check if granted
+        if (await Permission.camera.isDenied) {
+          final status = await Permission.camera.request();
+          if (status.isDenied || status.isPermanentlyDenied) {
+            return false;
+          }
+        }
+
+        // Check if camera permission is granted
+        final cameraStatus = await Permission.camera.status;
+        return cameraStatus.isGranted;
       } else if (Platform.isIOS) {
         if (await Permission.photos.isDenied) await Permission.photos.request();
+
+        // Request camera permission and check if granted
+        if (await Permission.camera.isDenied) {
+          final status = await Permission.camera.request();
+          if (status.isDenied || status.isPermanentlyDenied) {
+            return false;
+          }
+        }
+
+        // Check if camera permission is granted
+        final cameraStatus = await Permission.camera.status;
+        return cameraStatus.isGranted;
       }
+
+      return true;
     } catch (e) {
       print("Error requesting permissions: $e");
+      return false;
     }
   }
 
