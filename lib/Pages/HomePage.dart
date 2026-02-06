@@ -17,6 +17,7 @@ import 'package:timelapse_app/Pages/VideoGridElement.dart';
 import 'package:video_player/video_player.dart';
 
 class HomePage extends StatefulWidget {
+  // Contains info about the camera
   final CameraDescription cameraDescription;
   const HomePage({super.key, required this.cameraDescription});
 
@@ -63,7 +64,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     super.initState();
     _initializeAnimations();
     _initializeApp();
-    getGalleryImages();
   }
 
   void _initializeAnimations() {
@@ -99,8 +99,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       return;
     }
 
-    // Add a small delay to ensure camera hardware is available after permission grant
-    await Future.delayed(const Duration(milliseconds: 300));
+    // Add a delay to ensure camera hardware is available after permission grant
+    await Future.delayed(const Duration(milliseconds: 800));
 
     // Only initialize camera after permission is granted
     await _initializeCamera();
@@ -162,40 +162,40 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Future<bool> requestPermission() async {
     try {
-      if (Platform.isAndroid) {
-        if (await Permission.photos.isDenied) await Permission.photos.request();
-        if (await Permission.videos.isDenied) await Permission.videos.request();
-        if (await Permission.storage.isDenied)
-          await Permission.storage.request();
-
-        // Request camera permission and check if granted
-        if (await Permission.camera.isDenied) {
-          final status = await Permission.camera.request();
-          if (status.isDenied || status.isPermanentlyDenied) {
-            return false;
-          }
+      // Request camera permission FIRST and wait for it
+      final cameraStatus = await Permission.camera.status;
+      if (!cameraStatus.isGranted) {
+        final result = await Permission.camera.request();
+        if (!result.isGranted) {
+          print("Camera permission denied");
+          return false;
         }
-
-        // Check if camera permission is granted
-        final cameraStatus = await Permission.camera.status;
-        return cameraStatus.isGranted;
-      } else if (Platform.isIOS) {
-        if (await Permission.photos.isDenied) await Permission.photos.request();
-
-        // Request camera permission and check if granted
-        if (await Permission.camera.isDenied) {
-          final status = await Permission.camera.request();
-          if (status.isDenied || status.isPermanentlyDenied) {
-            return false;
-          }
-        }
-
-        // Check if camera permission is granted
-        final cameraStatus = await Permission.camera.status;
-        return cameraStatus.isGranted;
+        // Add delay after camera permission grant to let system settle
+        await Future.delayed(const Duration(milliseconds: 500));
       }
 
-      return true;
+      // Then request storage/photo permissions (these don't block camera)
+      if (Platform.isAndroid) {
+        // Request storage permissions sequentially
+        if (await Permission.photos.isDenied) {
+          await Permission.photos.request();
+        }
+        if (await Permission.videos.isDenied) {
+          await Permission.videos.request();
+        }
+        if (await Permission.storage.isDenied) {
+          await Permission.storage.request();
+        }
+      } else if (Platform.isIOS) {
+        if (await Permission.photos.isDenied) {
+          await Permission.photos.request();
+        }
+      }
+
+      // Verify camera permission one more time
+      final finalCameraStatus = await Permission.camera.status;
+      print("Final camera permission status: ${finalCameraStatus.isGranted}");
+      return finalCameraStatus.isGranted;
     } catch (e) {
       print("Error requesting permissions: $e");
       return false;
@@ -576,6 +576,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final imagePath = path.join(sessionDir.path, 'frame_$paddedCount.jpg');
 
       final image = await cameraController!.takePicture();
+      // temporary hold because sometime OS deletes these images causing the error to come
       await File(image.path).copy(imagePath);
 
       final savedFile = File(imagePath);
