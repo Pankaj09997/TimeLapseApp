@@ -46,6 +46,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   bool _isTimeLapseGenerated = false;
   bool _isVideoLoading = false;
 
+  // Frame-by-frame player state
+  bool _isFrameByFrameMode = false;
+  int _currentFrameIndex = 0;
+  bool _isPlayingFrames = false;
+  Timer? _framePlaybackTimer;
+
   // Animation controllers
   late AnimationController _recordButtonController;
   late AnimationController _pulseController;
@@ -214,6 +220,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _imageCount = 0;
       _generatedVideoPath = null;
       _latestImagePath = null;
+      _isFrameByFrameMode = false;
+      _currentFrameIndex = 0;
     });
 
     _recordButtonController.forward();
@@ -472,7 +480,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                                 setState(() {});
                                 setModalState(() {});
                               },
-
                               onDelete: () => _showDeleteDialog(
                                 _videos[index],
                                 index,
@@ -611,10 +618,17 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () {
+                Navigator.pop(context);
+                // Enable frame-by-frame mode without generating video
+                setState(() {
+                  _isFrameByFrameMode = true;
+                  _currentFrameIndex = 0;
+                });
+              },
               child: const Text(
-                "Cancel",
-                style: TextStyle(color: Colors.white60),
+                "View Frames",
+                style: TextStyle(color: Color(0xFF7C3AED)),
               ),
             ),
             ElevatedButton(
@@ -723,9 +737,68 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
+  // Frame-by-frame player methods
+  void _toggleFramePlayback() {
+    setState(() {
+      _isPlayingFrames = !_isPlayingFrames;
+    });
+
+    if (_isPlayingFrames) {
+      _startFramePlayback();
+    } else {
+      _stopFramePlayback();
+    }
+  }
+
+  void _startFramePlayback() {
+    _framePlaybackTimer?.cancel();
+    _framePlaybackTimer = Timer.periodic(
+      Duration(milliseconds: 1000 ~/ _getFrameVideoRates()),
+      (timer) {
+        if (_currentFrameIndex < capturedVideosPath.length - 1) {
+          setState(() {
+            _currentFrameIndex++;
+          });
+        } else {
+          // Loop back to start
+          setState(() {
+            _currentFrameIndex = 0;
+          });
+        }
+      },
+    );
+  }
+
+  void _stopFramePlayback() {
+    _framePlaybackTimer?.cancel();
+  }
+
+  void _goToPreviousFrame() {
+    HapticFeedback.selectionClick();
+    if (_currentFrameIndex > 0) {
+      setState(() {
+        _currentFrameIndex--;
+        _isPlayingFrames = false;
+      });
+      _stopFramePlayback();
+    }
+  }
+
+  void _goToNextFrame() {
+    HapticFeedback.selectionClick();
+    if (_currentFrameIndex < capturedVideosPath.length - 1) {
+      setState(() {
+        _currentFrameIndex++;
+        _isPlayingFrames = false;
+      });
+      _stopFramePlayback();
+    }
+  }
+
   @override
   void dispose() {
     captureTimer?.cancel();
+    _framePlaybackTimer?.cancel();
     cameraController?.dispose();
     videoPlayerController?.dispose();
     _recordButtonController.dispose();
@@ -736,110 +809,500 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      extendBodyBehindAppBar: true,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        systemOverlayStyle: SystemUiOverlayStyle.light,
-        title: Text(
-          timelapseType.toUpperCase(),
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.2,
+    return WillPopScope(
+      onWillPop: () async {
+        // If in frame-by-frame mode, exit to camera view
+        if (_isFrameByFrameMode) {
+          setState(() {
+            _isFrameByFrameMode = false;
+            _isPlayingFrames = false;
+            _currentFrameIndex = 0;
+          });
+          _stopFramePlayback();
+          return false; // Don't pop the route
+        }
+
+        // If video is generated, go back to camera view
+        if (_generatedVideoPath != null) {
+          setState(() {
+            _generatedVideoPath = null;
+            _isTimeLapseGenerated = false;
+            capturedVideosPath.clear();
+            _imageCount = 0;
+            _latestImagePath = null;
+          });
+          videoPlayerController?.dispose();
+          videoPlayerController = null;
+          return false; // Don't pop the route
+        }
+
+        // If recording, show warning
+        if (_isRecording) {
+          _showStopRecordingDialog();
+          return false; // Don't pop the route
+        }
+
+        // Otherwise allow normal back navigation
+        return true;
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        extendBodyBehindAppBar: true,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          systemOverlayStyle: SystemUiOverlayStyle.light,
+          leading: _generatedVideoPath != null || _isFrameByFrameMode
+              ? IconButton(
+                  icon: const Icon(Icons.arrow_back, color: Colors.white),
+                  onPressed: () {
+                    if (_isFrameByFrameMode) {
+                      setState(() {
+                        _isFrameByFrameMode = false;
+                        _isPlayingFrames = false;
+                        _currentFrameIndex = 0;
+                      });
+                      _stopFramePlayback();
+                    } else if (_generatedVideoPath != null) {
+                      setState(() {
+                        _generatedVideoPath = null;
+                        _isTimeLapseGenerated = false;
+                        capturedVideosPath.clear();
+                        _imageCount = 0;
+                        _latestImagePath = null;
+                      });
+                      videoPlayerController?.dispose();
+                      videoPlayerController = null;
+                    }
+                  },
+                )
+              : null,
+          title: Text(
+            _isFrameByFrameMode
+                ? 'FRAME PREVIEW'
+                : _generatedVideoPath != null
+                ? 'VIDEO PREVIEW'
+                : timelapseType.toUpperCase(),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.2,
+            ),
           ),
+          centerTitle: true,
+          actions: [
+            if (!_isFrameByFrameMode && _generatedVideoPath == null)
+              IconButton(
+                onPressed: () {
+                  getGalleryImages();
+                },
+                icon: Icon(Icons.image),
+              ),
+          ],
         ),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            onPressed: () {
-              getGalleryImages();
-            },
-            icon: Icon(Icons.image),
-          ),
-        ],
-      ),
-      body: _isCameraInitialized && cameraController != null
-          ? Stack(
-              children: [
-                // Full-screen camera preview
-                Positioned.fill(
-                  child:
-                      _generatedVideoPath != null &&
-                          videoPlayerController != null
-                      ? _buildVideoPreview()
-                      : CameraPreview(cameraController!),
-                ),
-
-                // Top gradient overlay
-                Positioned(
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  child: Container(
-                    height: 120,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.black.withOpacity(0.6),
-                          Colors.transparent,
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-
-                // Recording indicators
-                if (_isRecording) ...[
-                  _buildRecordingIndicator(),
-                  if (_latestImagePath != null) _buildLatestImageThumbnail(),
-                ],
-
-                // Bottom control panel
-                Positioned(
-                  bottom: 0,
-                  left: 0,
-                  right: 0,
-                  child: _buildControlPanel(),
-                ),
-              ],
-            )
-          : Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+        body: _isCameraInitialized && cameraController != null
+            ? Stack(
                 children: [
-                  Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        colors: [
-                          const Color(0xFF7C3AED),
-                          const Color(0xFF7C3AED).withOpacity(0.6),
-                        ],
-                      ),
-                    ),
-                    child: const Center(
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 3,
+                  // Full-screen preview (camera, video, or frame-by-frame)
+                  Positioned.fill(
+                    child: _isFrameByFrameMode
+                        ? _buildFrameByFramePlayer()
+                        : _generatedVideoPath != null &&
+                              videoPlayerController != null
+                        ? _buildVideoPreview()
+                        : CameraPreview(cameraController!),
+                  ),
+
+                  // Top gradient overlay
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: Container(
+                      height: 120,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.black.withOpacity(0.6),
+                            Colors.transparent,
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                  const SizedBox(height: 20),
-                  const Text(
-                    "Initializing Camera...",
-                    style: TextStyle(color: Colors.white70, fontSize: 14),
+
+                  // Recording indicators
+                  if (_isRecording) ...[
+                    _buildRecordingIndicator(),
+                    if (_latestImagePath != null) _buildLatestImageThumbnail(),
+                  ],
+
+                  // Bottom control panel
+                  Positioned(
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    child: _buildControlPanel(),
                   ),
                 ],
+              )
+            : Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 60,
+                      height: 60,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          colors: [
+                            const Color(0xFF7C3AED),
+                            const Color(0xFF7C3AED).withOpacity(0.6),
+                          ],
+                        ),
+                      ),
+                      child: const Center(
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 3,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      "Initializing Camera...",
+                      style: TextStyle(color: Colors.white70, fontSize: 14),
+                    ),
+                  ],
+                ),
+              ),
+      ),
+    );
+  }
+
+  void _showStopRecordingDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C1E),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: const Text(
+            "Stop Recording?",
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          content: const Text(
+            'Recording is in progress. Do you want to stop and exit?',
+            style: TextStyle(color: Colors.white70, fontSize: 16),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text(
+                "Continue Recording",
+                style: TextStyle(color: Color(0xFF7C3AED)),
               ),
             ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context); // Close dialog
+                _stopTimeLapse();
+                Navigator.pop(context); // Go back to previous screen
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: const Text(
+                "Stop & Exit",
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFrameByFramePlayer() {
+    if (capturedVideosPath.isEmpty) {
+      return const Center(
+        child: Text(
+          'No frames captured',
+          style: TextStyle(color: Colors.white),
+        ),
+      );
+    }
+
+    return Stack(
+      children: [
+        // Current frame display
+        Center(
+          child: Image.file(
+            File(capturedVideosPath[_currentFrameIndex]),
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stackTrace) {
+              return Container(
+                color: const Color(0xFF2C2C2E),
+                child: const Icon(
+                  Icons.broken_image,
+                  color: Colors.white38,
+                  size: 60,
+                ),
+              );
+            },
+          ),
+        ),
+
+        // Frame controls overlay
+        Positioned(
+          bottom: 200,
+          left: 0,
+          right: 0,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Column(
+              children: [
+                // Frame counter
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.6),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${_currentFrameIndex + 1} / ${capturedVideosPath.length}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Image thumbnail slider
+                _buildImageSlider(),
+
+                const SizedBox(height: 16),
+
+                // Playback controls
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _buildFrameControlButton(
+                      icon: Icons.skip_previous,
+                      onPressed: _goToPreviousFrame,
+                      enabled: _currentFrameIndex > 0,
+                    ),
+                    const SizedBox(width: 20),
+                    _buildFrameControlButton(
+                      icon: _isPlayingFrames ? Icons.pause : Icons.play_arrow,
+                      onPressed: _toggleFramePlayback,
+                      enabled: true,
+                      isPrimary: true,
+                    ),
+                    const SizedBox(width: 20),
+                    _buildFrameControlButton(
+                      icon: Icons.skip_next,
+                      onPressed: _goToNextFrame,
+                      enabled:
+                          _currentFrameIndex < capturedVideosPath.length - 1,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+
+                // Exit frame mode button
+                _buildGlassButton(
+                  icon: Icons.close,
+                  label: 'Exit Preview',
+                  onPressed: () {
+                    setState(() {
+                      _isFrameByFrameMode = false;
+                      _isPlayingFrames = false;
+                      _currentFrameIndex = 0;
+                    });
+                    _stopFramePlayback();
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildImageSlider() {
+    // Calculate how many thumbnails to show based on total frames
+    final int totalFrames = capturedVideosPath.length;
+    final int maxThumbnails = 20; // Maximum thumbnails to show
+
+    // Calculate step for thumbnail selection
+    final int step = totalFrames > maxThumbnails
+        ? (totalFrames / maxThumbnails).ceil()
+        : 1;
+
+    // Generate thumbnail indices
+    List<int> thumbnailIndices = [];
+    for (int i = 0; i < totalFrames; i += step) {
+      thumbnailIndices.add(i);
+    }
+
+    // Ensure last frame is always included
+    if (thumbnailIndices.last != totalFrames - 1) {
+      thumbnailIndices.add(totalFrames - 1);
+    }
+
+    return SizedBox(
+      height: 70,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.3),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: Colors.white.withOpacity(0.2),
+                width: 1,
+              ),
+            ),
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: thumbnailIndices.length,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              itemBuilder: (context, index) {
+                final frameIndex = thumbnailIndices[index];
+                final isSelected = _currentFrameIndex == frameIndex;
+
+                return GestureDetector(
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    setState(() {
+                      _currentFrameIndex = frameIndex;
+                      _isPlayingFrames = false;
+                    });
+                    _stopFramePlayback();
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: 50,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: isSelected
+                            ? const Color(0xFF7C3AED)
+                            : Colors.white.withOpacity(0.3),
+                        width: isSelected ? 3 : 1.5,
+                      ),
+                      boxShadow: isSelected
+                          ? [
+                              BoxShadow(
+                                color: const Color(0xFF7C3AED).withOpacity(0.5),
+                                blurRadius: 8,
+                                spreadRadius: 1,
+                              ),
+                            ]
+                          : [],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.file(
+                            File(capturedVideosPath[frameIndex]),
+                            fit: BoxFit.cover,
+                            errorBuilder: (context, error, stackTrace) {
+                              return Container(
+                                color: const Color(0xFF2C2C2E),
+                                child: const Icon(
+                                  Icons.broken_image,
+                                  color: Colors.white38,
+                                  size: 20,
+                                ),
+                              );
+                            },
+                          ),
+                          if (isSelected)
+                            Container(
+                              color: const Color(0xFF7C3AED).withOpacity(0.3),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFrameControlButton({
+    required IconData icon,
+    required VoidCallback onPressed,
+    required bool enabled,
+    bool isPrimary = false,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(isPrimary ? 35 : 25),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          width: isPrimary ? 70 : 50,
+          height: isPrimary ? 70 : 50,
+          decoration: BoxDecoration(
+            color: enabled
+                ? (isPrimary
+                      ? const Color(0xFF7C3AED).withOpacity(0.3)
+                      : Colors.white.withOpacity(0.15))
+                : Colors.white.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(isPrimary ? 35 : 25),
+            border: Border.all(
+              color: enabled
+                  ? Colors.white.withOpacity(0.2)
+                  : Colors.white.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: enabled ? onPressed : null,
+              borderRadius: BorderRadius.circular(isPrimary ? 35 : 25),
+              child: Center(
+                child: Icon(
+                  icon,
+                  color: enabled ? Colors.white : Colors.white38,
+                  size: isPrimary ? 32 : 24,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1005,9 +1468,17 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 onPressed: () {
                   setState(() {
                     _generatedVideoPath = null;
-                    videoPlayerController?.dispose();
-                    videoPlayerController = null;
+                    _isTimeLapseGenerated = false;
+                    capturedVideosPath.clear();
+                    _imageCount = 0;
+                    _latestImagePath = null;
+                    _isFrameByFrameMode = false;
+                    _currentFrameIndex = 0;
+                    _isPlayingFrames = false;
                   });
+                  videoPlayerController?.dispose();
+                  videoPlayerController = null;
+                  _stopFramePlayback();
                 },
               ),
             ],
@@ -1097,16 +1568,70 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             children: [
               if (_isProcessing)
                 _buildProcessingIndicator()
+              else if (_isFrameByFrameMode)
+                const SizedBox.shrink() // Hide controls in frame mode
               else ...[
                 _buildStatsRow(),
                 const SizedBox(height: 28),
                 _buildRecordButton(),
                 if (capturedVideosPath.isNotEmpty && !_isRecording) ...[
                   const SizedBox(height: 16),
-                  _buildMakeVideoButton(),
+                  Row(
+                    children: [
+                      Expanded(child: _buildViewFramesButton()),
+                      const SizedBox(width: 12),
+                      Expanded(child: _buildMakeVideoButton()),
+                    ],
+                  ),
                 ],
               ],
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildViewFramesButton() {
+    return Container(
+      height: 52,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        gradient: LinearGradient(
+          colors: [
+            Colors.white.withOpacity(0.15),
+            Colors.white.withOpacity(0.10),
+          ],
+        ),
+        border: Border.all(color: Colors.white.withOpacity(0.3), width: 1),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {
+            setState(() {
+              _isFrameByFrameMode = true;
+              _currentFrameIndex = 0;
+            });
+          },
+          borderRadius: BorderRadius.circular(16),
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                Icon(Icons.slideshow, color: Colors.white, size: 20),
+                SizedBox(width: 10),
+                Text(
+                  'View Frames',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1276,7 +1801,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Widget _buildMakeVideoButton() {
     return Container(
-      width: double.infinity,
       height: 52,
       decoration: _isTimeLapseGenerated
           ? BoxDecoration(
@@ -1327,25 +1851,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               children: [
                 Icon(Icons.video_library, color: Colors.white, size: 20),
                 SizedBox(width: 10),
-                _isTimeLapseGenerated
-                    ? Text(
-                        'Timelapse Generated',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.3,
-                        ),
-                      )
-                    : Text(
-                        'Generate Timelapse',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.3,
-                        ),
-                      ),
+                Text(
+                  _isTimeLapseGenerated ? 'Generated' : 'Generate',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3,
+                  ),
+                ),
               ],
             ),
           ),
